@@ -1,4 +1,6 @@
 /* 
+ * See https://www.youtube.com/
+ *
  * This is a Microsoft Kinect-using program for colorfully rendering
  * depth maps in near-real time. Excellent for dance floors - e.g. connect
  * a Kinect to a laptop, point the Kinect at a dance floor, and connect the 
@@ -10,9 +12,8 @@
  * A motion trail effect was created by adding multiple depth buffers. A
  * shifting color gradient system gives the output an 80's rave feeling. A 
  * simple in-painting algorithm fills in gaps or shadows in the depth map.
- * Also included is a median filter to smooth out noise, but this is slow
- * on some machines. Added an aspect ratio correction to simplify widescreen
- * setups. 
+ * Also included is a median filter to smooth out noise. Added an aspect 
+ * ratio correction to simplify widescreen setups. 
  * 
  * Currently only tested on Linux, but should be adaptable to other 
  * platforms.
