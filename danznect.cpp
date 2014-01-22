@@ -1,5 +1,5 @@
 /* 
- * See https://www.youtube.com/
+ * See http://youtu.be/1W11wrZPE2E
  *
  * This is a Microsoft Kinect-using program for colorfully rendering
  * depth maps in near-real time. Excellent for dance floors - e.g. connect
