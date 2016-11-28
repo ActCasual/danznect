@@ -51,14 +51,43 @@
  * either License.
  */
 
-#include <libfreenect.hpp>
+// FIXME: move all buffer allocations to main() (although compiler optimization
+//        might already take care of this)
+// TODO: build with debug symbols, perform random stack stops to find slow parts of code
+// TODO: add event layer and sequencer, and feed keyboard events into event sequencer
+//		 - instead of changing global params directly, put state instance in queue with 
+//         current time, then "activate" that state when past that time
+//		 - need to figure out how to set up cumulative timer, not just frame-to-frame
+//         elapsed time delta
+//       - fills could then be a list of state instances and offset times, added to event
+//         queue
+//       - figure out what to do if states put in event queue out of order of their intended
+//         times of activation
+// TODO: try using Mat_<_Tp> instead of Mat to simplify code
+// FIXME: replace one-dimensional vector buffers holding 3-channels with explicit 
+//        array of 3-element arrays (although this might be slower?)
+// TODO: option to to save video from this program
+// TODO: other gradient interpolation options (e.g. thresholded rather than interpolated)
+
+// TODO:  use numbers for selecting overall presets (combos of gradients, periods, speeds, and effects)
+// TODO: use shift-numbers held down to trigger temporary "rolls" - will require class to convert between temp and current options 
+
+// TODO: option to hide notifications
+
+#include "libfreenect_cpp11.hpp"
+#include "opencv/cv.h"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/highgui/highgui.hpp"
+#include "opencv2/photo/photo.hpp"
 
 #include <stdio.h>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <cmath>
 #include <pthread.h>
 #include <unistd.h>
+#include <chrono>
 #include "glWindowPos.h"
 
 
@@ -82,19 +111,58 @@
 
 using namespace std;
 
+
+class Timer // from https://gist.github.com/gongzhitaao/7062087
+{
+public:
+    Timer() : beg_(clock_::now()) {}
+    void reset() { beg_ = clock_::now(); }
+    double elapsed() const { 
+        return std::chrono::duration_cast<second_>
+            (clock_::now() - beg_).count(); }
+
+private:
+    typedef std::chrono::high_resolution_clock clock_;
+    typedef std::chrono::duration<double, std::ratio<1> > second_;
+    std::chrono::time_point<clock_> beg_;
+};
+
+Timer fps_timer = Timer();
+Timer gradient_timer = Timer();
+
 // global options
 bool medianFilterSet = true;
 bool inPaintSet = true;
 bool gradientMotionSet = true;
+int colorScheme = 0;
+bool posterizeSet = false;
+bool circularSet = false;
+bool showFPSset = false;
 unsigned int bufferWidth = 320;
 unsigned int bufferHeight = 240;
 #define maxBuffers 45
 unsigned int currentBuffers = 45;
 float brightnessFactor = 1;
+//float speedFactor = 1.0;
+std::vector<float> speedFactors = {0.0, 0.06, 0.1, 0.5, 1.0, 2.0, 3.0};
+int speedFactorIndex = 3;
+
+std::vector<std::string> outlines = {"none", "rainbow", "bright", "dark"};
+int outline_index = 0;
+
+vector<vector<uint8_t>> gradient_a;
+vector<vector<uint8_t>> gradient_b;
+int gradient_index = 0;
+
+uint8_t gradientMod[2048*3] = {};
+std::vector<float> gradient_periods = {0.01, 0.011, 0.025, 0.05, 0.1, 0.2, 0.333333, 0.6, 0.8, 1.0, 2.0, 5.0};
+int gradient_period_index = 6;
+float gradientOffsetA = 0.0;
+float gradientOffsetB = 0.0;
 
 // global output string
 char outputCharBuf[1024] = {0};
-char* outputString = 
+std::string outputString = 
 "\n"
 "        OO         O      O     O  OOO  O     O    OO    OO  OOO\n"
 "        O   O    O O    OO  O       O   OO  O  O       O          O\n"
@@ -173,6 +241,146 @@ uint16_t opt_med9(uint16_t* p){
 }
 #undef PIX_SWAP
 #undef PIX_SORT
+
+// FIXME: getting discontinuities, probably for non 1.0 periods
+vector<uint8_t> makeGradient(vector<int> r, 
+                             vector<int> g,
+                             vector<int> b,
+                             float period,
+                             vector<int> bg_color={0,0,0}){
+    bool debug = false; 
+    vector<uint8_t> grad(2048*3);
+    int r1, g1, b1, r2, g2, b2;
+    for(int i=0; i<2048; i++){
+        // locate the nearest left and right colors, then interpolate
+        double grad_index = (i/2048.0f)/period*r.size();
+        //float in_range_grad_index = r.size()+int(grad_index)%r.size();
+        int in_range_grad_index = round(grad_index);
+        if (i>1986){
+            if(debug){
+                cout << "i = " << i << endl;
+                cout << "grad_index = " << grad_index << endl;
+                cout << "in_range_grad_index = " << in_range_grad_index << endl;                
+            }
+        }
+        // fill indices outside range with bg color to match previous behavior (may change in future)
+        if (in_range_grad_index>=r.size()){
+            grad[3*i  ] = (uint8_t) bg_color[0];
+            grad[3*i+1] = (uint8_t) bg_color[1];
+            grad[3*i+2] = (uint8_t) bg_color[2];
+            continue;
+        }
+        int left = floor(grad_index);
+        int in_range_left = (r.size()+left)%r.size();
+        int right = ceil(grad_index);
+        int in_range_right = (r.size()+right)%r.size();
+
+        double x = grad_index - in_range_left;
+
+        r1 = r[in_range_left];
+        g1 = g[in_range_left];
+        b1 = b[in_range_left];
+
+        r2 = r[in_range_right];
+        g2 = g[in_range_right];
+        b2 = b[in_range_right];
+
+        double r_slope = (double)(r2-r1)/(in_range_right-in_range_left);
+        double g_slope = (double)(g2-g1)/(in_range_right-in_range_left);
+        double b_slope = (double)(b2-b1)/(in_range_right-in_range_left);
+        if (in_range_left==in_range_right){
+            grad[3*i  ] = (uint8_t) r1;
+            grad[3*i+1] = (uint8_t) g1;
+            grad[3*i+2] = (uint8_t) b1;
+        } else {
+            grad[3*i  ] = (uint8_t) round(x*r_slope + r1);
+            grad[3*i+1] = (uint8_t) round(x*g_slope + g1);
+            grad[3*i+2] = (uint8_t) round(x*b_slope + b1);
+        }
+    }
+
+    return grad;
+}
+
+
+void print_gradient(vector<uint8_t> grad){
+    int r,g,b;
+    for(int i=0; i<grad.size(); i+=3){
+        r = grad[i];
+        g = grad[i+1];
+        b = grad[i+2];
+        cout << i/3 << ": ( " << r << ", " << g << ", " << b << " )" << endl;
+    }
+}
+
+void initGradients(){
+    int start_depth, depth_increment;
+    vector<int> r, g, b;
+
+    // rainbow
+
+    r = { 0,  255,    0,    0,    0,  255,    0,    0,    0,  255,   0,  128,   0, 255,  0,    0,  0};
+    g = { 0,    0,    0,  255,    0,  255,    0,  255,    0,  128,   0,  255,   0,   0,  0,  128,  0};
+    b = { 0,  255,    0,  255,    0,    0,    0,  128,    0,    0,   0,    0,   0, 128,  0,  255,  0}; 
+    gradient_a.push_back(makeGradient(r, g, b, 1.0));
+
+    r = {  0,  128,    0,  128,    0,    0,    0,    0,    0,  128,   0,    0,   0,   0,  0,  255,  0};
+    g = {  0,    0,    0,  128,    0,    0,    0,  128,    0,    0,   0,  128,   0,   0,  0,    0,  0};
+    b = {  0,    0,    0,    0,    0,  128,    0,    0,    0,  128,   0,  128,   0, 255,  0,    0,  0};                
+    gradient_b.push_back(makeGradient(r, g, b, 0.641));          
+
+    // bright rainbow
+
+    r = { 255,  255,   255,    0,  255,  255,  255,    0,  255,  255, 255,  128, 255, 255, 255,    0,  255};
+    g = { 255,    0,   255,  255,  255,  255,  255,  255,  255,  128, 255,  255, 255,   0, 255,  128,  255};
+    b = { 255,  255,   255,  255,  255,    0,  255,  128,  255,    0, 255,    0, 255, 128, 255,  255,  255}; 
+    gradient_a.push_back(makeGradient(r, g, b, 1.0, {255,255,255}));
+    //print_gradient(gradient_a[1]);
+
+    r = {  0,  128,    0,  128,    0,    0,    0,    0,    0,  128,   0,    0,   0,   0,  0,  255,  0};
+    g = {  0,    0,    0,  128,    0,    0,    0,  128,    0,    0,   0,  128,   0,   0,  0,    0,  0};
+    b = {  0,    0,    0,    0,    0,  128,    0,    0,    0,  128,   0,  128,   0, 255,  0,    0,  0};                
+    gradient_b.push_back(makeGradient(r, g, b, 0.641)); 
+
+    // red-orange green (predator-esque w/outlines)
+
+    r = {  0,  255,    0,  0};
+    g = {  0,   75,  120,  0};
+    b = {  0,   50,    0,  0};                  
+    gradient_a.push_back(makeGradient(r, g, b, 1.0));
+
+    r = {  0,  128,    0};
+    g = {  0,    0,    0};
+    b = {  0,  255,    0};                
+    gradient_b.push_back(makeGradient(r, g, b, 0.93));         
+
+    // red-orange green alt
+
+    r = {  0,  255,  255,   0,  0};
+    g = {  0,   75,   75, 120,  0};
+    b = {  0,   50,   50,   0,  0};                  
+    gradient_a.push_back(makeGradient(r, g, b, 1.0));
+
+    r = {  0,  128, 128,  0};
+    g = {  0,    0,   0,  0};
+    b = {  0,  255, 255,  0};                
+    gradient_b.push_back(makeGradient(r, g, b, 0.93));  
+
+    // black and white
+
+    r = {  0,  255,  255,  255, 0, 0, 0, 0};
+    g = {  0,  255,  255,  255, 0, 0, 0, 0};
+    b = {  0,  255,  255,  255, 0, 0, 0, 0};                  
+    gradient_a.push_back(makeGradient(r, g, b, 1.0));
+
+    r = {  0,    0,    0};
+    g = {  0,    0,    0};
+    b = {  0,    0,    0};                
+    gradient_b.push_back(makeGradient(r, g, b, 1.0));         
+
+
+}
+
 
 // simple median filter
 void medianFilter(uint16_t* array, unsigned int bufferHeight, unsigned int bufferWidth){
@@ -302,89 +510,29 @@ void inPaintVert(uint16_t* array, unsigned int bufferHeight, unsigned int buffer
     }
 }
 
-void makeGradient(uint8_t gradient[], int numColors, int rArray[], int gArray[], int bArray[], int startDepth, int depthIncrement){ 
-    for(int i=0; i<2048*3; i++){
-        gradient[i] = (uint8_t)0;
-    }
-        
-    int r1, g1, b1, r2, g2, b2;
-    int depthStart, depthEnd;       
-    depthEnd = startDepth;
-    for(int arrayIndex=0; arrayIndex<numColors-1; arrayIndex++){
-        depthStart = depthEnd;
-        depthEnd = depthStart+depthIncrement;
-        if(depthEnd>2047){
-            printf("\r\n depthEnd out of range\n");
-            fflush(stdout);
-            break;
-        }
-        //printf("\r\n depthStart = %i, depthEnd=%i",depthStart,depthEnd);
-        int depthRange = depthEnd-depthStart; 
-        
-        r1 = rArray[arrayIndex];
-        g1 = gArray[arrayIndex];
-        b1 = bArray[arrayIndex];
-
-        r2 = rArray[arrayIndex+1];
-        g2 = gArray[arrayIndex+1];
-        b2 = bArray[arrayIndex+1];
-        //printf("\r\n r1,g1,b1 = %i,%i,%i, r2,g2,b2 = %i,%i,%i\r\n",r1,g1,b1,r2,g2,b2);
-        //fflush(stdout);
-        double rSlope = (double)(r2-r1)/depthRange;
-        double gSlope = (double)(g2-g1)/depthRange;
-        double bSlope = (double)(b2-b1)/depthRange;
-        for(int i=depthStart; i<depthEnd; i++){
-            gradient[3*i  ] = (uint8_t) ((i-depthStart)*rSlope + r1);
-            gradient[3*i+1] = (uint8_t) ((i-depthStart)*gSlope + g1);
-            gradient[3*i+2] = (uint8_t) ((i-depthStart)*bSlope + b1);
-            //printf("\r\n gradient[3*%i] = %i",i,gradient[3*i]);
-        }
-    }
-}
 
 
 class MyFreenectDevice : public Freenect::FreenectDevice {
     public:
         uint16_t* bufferPt[maxBuffers];
-        uint8_t gradient[2048*3];
-        uint8_t gradientB[2048*3];
-        uint8_t gradientMod[2048*3];
         int contourInterval, contourSlope;
         int contourMin, contourMax;
         int contourOffset, contourOffsetMax, contourOffsetMin;
-        int gradientOffset, gradientOffsetB;
         uint16_t* tempBufferA;
         uint16_t* tempBufferB;
         uint16_t* tempPointer;
         uint16_t* procDepth;
+        //std::vector<uint16_t        
 
         MyFreenectDevice(freenect_context *_ctx, int _index) : Freenect::FreenectDevice(_ctx, _index),
-        m_buffer_depth(bufferWidth*bufferHeight*3), 
-        m_gamma(2048), 
-        m_new_depth_frame(false) {
+              m_buffer_depth(bufferWidth*bufferHeight*3), 
+              m_gamma(2048), 
+              m_new_depth_frame(false) {
+
             srand((unsigned)time(0));
             for(unsigned int i=0; i<maxBuffers; i++){
                 bufferPt[i] = (uint16_t*) malloc(bufferWidth*bufferHeight*sizeof(uint16_t));
             }
-
-            int numColors = 17;
-            int rArray[17] = {  0,  255,    0,    0,    0,  255,    0,    0,    0,  255,   0,  128,   0, 255,  0,    0,  0};
-            int gArray[17] = {  0,    0,    0,  255,    0,  255,    0,  255,    0,  128,   0,  255,   0,   0,  0,  128,  0};
-            int bArray[17] = {  0,  255,    0,  255,    0,    0,    0,  128,    0,    0,   0,    0,   0, 128,  0,  255,  0};                
-            int startDepth = 0;
-            int depthIncrement = 120;            
-            makeGradient(gradient, numColors, rArray, gArray, bArray, startDepth, depthIncrement);
-
-            numColors = 17;
-            int rArrayB[17] = {  0,  128,    0,  128,    0,    0,    0,    0,    0,  128,   0,    0,   0,   0,  0,  255,  0};
-            int gArrayB[17] = {  0,    0,    0,  128,    0,    0,    0,  128,    0,    0,   0,  128,   0,   0,  0,    0,  0};
-            int bArrayB[17] = {  0,    0,    0,    0,    0,  128,    0,    0,    0,  128,   0,  128,   0, 255,  0,    0,  0};                
-            startDepth = 0;
-            depthIncrement = 77;
-            makeGradient(gradientB, numColors, rArrayB, gArrayB, bArrayB, startDepth, depthIncrement);          
-
-            gradientOffset = 0;
-            gradientOffsetB = 0;
             
             tempBufferA = (uint16_t*) malloc(bufferWidth*bufferHeight*sizeof(uint16_t));
             tempBufferB = (uint16_t*) malloc(bufferWidth*bufferHeight*sizeof(uint16_t));
@@ -394,7 +542,10 @@ class MyFreenectDevice : public Freenect::FreenectDevice {
             for( unsigned int i = 0 ; i < 2048 ; i++) {
                 float v = i/2048.0;
                 v = pow(v, 3)* 6;
-                m_gamma[i] = v*6*256;
+                m_gamma[i] = v*256; // v*6*256 (old version bug)
+                if(m_gamma[i]>2047){
+                    std::cout << "m_gamma[i] > 2047" << std::endl;
+                }
             }
         }
 
@@ -419,7 +570,10 @@ class MyFreenectDevice : public Freenect::FreenectDevice {
             for(unsigned int x = 0; x<320; x++){
                 for(unsigned int y=0; y<240; y++){
                     index = y*320+x;
-                    bufferPt[0][index] = MIN(MIN(MIN(depth[y*2*640+x*2],depth[y*2*640+x*2+1]),depth[(y*2+1)*640+x*2+1]),depth[(y*2+1)*640+x*2]);                
+                    bufferPt[0][index] = MIN(MIN(MIN(depth[y*2*640+x*2],
+                                                     depth[y*2*640+x*2+1]),
+                                                     depth[(y*2+1)*640+x*2+1]),
+                                                     depth[(y*2+1)*640+x*2]);                
                 }
             }
 
@@ -438,9 +592,23 @@ class MyFreenectDevice : public Freenect::FreenectDevice {
                 for(unsigned int i = 0; i<bufferWidth*bufferHeight; i++){
                     bufferPt[0][i] = MAX(tempBufferA[i],tempBufferB[i]);
                     //bufferPt[0][i] = tempBufferB[i];
-                }              
-            }              
-                
+                }   
+            }
+
+            if(outlines[outline_index] == "rainbow"){
+                cv::Mat cv_buffer(bufferHeight, bufferWidth, CV_16UC1 );
+                memcpy( cv_buffer.data, bufferPt[0], bufferWidth*bufferHeight*sizeof(uint16_t) );
+                cv_buffer.convertTo(cv_buffer, CV_8UC1, 256/2048.0);
+
+                // glitchy cool outline effect
+                cv::GaussianBlur( cv_buffer, cv_buffer, cv::Size(5,5), 0, 0, cv::BORDER_REFLECT );
+                //cv::GaussianBlur( cv_buffer, cv_buffer, cv::Size(5,5), 0, 0, cv::BORDER_REFLECT );
+
+                cv_buffer.convertTo(cv_buffer, CV_16UC1, 2048/256.0);
+                memcpy( bufferPt[0], cv_buffer.data, bufferWidth*bufferHeight*sizeof(uint16_t) );
+            }
+
+            // collapse depth buffers to nearest points
             uint16_t tempDepth;
             for(unsigned int i = 0; i<bufferWidth*bufferHeight; i++){
                 tempDepth = (uint16_t)2047;
@@ -453,41 +621,201 @@ class MyFreenectDevice : public Freenect::FreenectDevice {
             // median filter
             if(medianFilterSet){ medianFilter(procDepth,bufferHeight,bufferWidth); }  
 
-            // move color gradients (should add option to adjust speed)
+            // TODO: erode/dilate options
+
+            if(posterizeSet){
+                cv::Mat cv_buffer(bufferHeight, bufferWidth, CV_16UC1 );
+                memcpy( cv_buffer.data, procDepth, bufferWidth*bufferHeight*sizeof(uint16_t) );
+                cv_buffer.convertTo(cv_buffer, CV_8UC1, 256/2048.0);
+                cv_buffer.convertTo(cv_buffer, CV_16UC1, 2048/256.0);
+                memcpy( procDepth, cv_buffer.data, bufferWidth*bufferHeight*sizeof(uint16_t) );
+            }
+
+            if(circularSet){
+                memcpy( bufferPt[0], procDepth, bufferWidth*bufferHeight*sizeof(uint16_t) );
+            }
+
+            cv::Mat grad;
+            if(outlines[outline_index] == "dark"){
+                cv::Mat cv_buffer(bufferHeight, bufferWidth, CV_16UC1 );
+                memcpy( cv_buffer.data, procDepth, bufferWidth*bufferHeight*sizeof(uint16_t) );
+                cv_buffer.convertTo(cv_buffer, CV_8UC1, 256/2048.0);
+
+                int scale = 1;
+                int delta = 0;              
+                int ddepth = CV_16S;                
+                cv::Mat blurred;
+                cv::GaussianBlur( cv_buffer, blurred, cv::Size(3,3), 0, 0, cv::BORDER_REFLECT );
+                cv::Mat grad_x, grad_y;
+                cv::Mat abs_grad_x, abs_grad_y;
+                cv::Sobel( blurred, grad_x, ddepth, 1, 0, 3, scale, delta, cv::BORDER_DEFAULT );
+                cv::Sobel( blurred, grad_y, ddepth, 0, 1, 3, scale, delta, cv::BORDER_DEFAULT );
+                cv::convertScaleAbs( grad_x, abs_grad_x );
+                cv::convertScaleAbs( grad_y, abs_grad_y );
+                cv::addWeighted( abs_grad_x, 0.5, abs_grad_y, 0.5, 0, grad );
+
+                // add grad to itself a few times to brighten
+                for(int i=0; i<5; i++){    
+                    cv::add(grad, grad, grad);
+                }
+                //cv::GaussianBlur(grad, grad, cv::Size(3,3), 0, 0, cv::BORDER_REFLECT);                
+
+                // scale to max grad
+                double minVal; 
+                double maxVal; 
+                cv::Point minLoc; 
+                cv::Point maxLoc;
+                cv::minMaxLoc( grad, &minVal, &maxVal, &minLoc, &maxLoc );
+                float scale_factor = 255.0/maxVal;
+                cv::convertScaleAbs( grad, grad, scale_factor);
+
+                cv::cvtColor(grad, grad, CV_GRAY2RGB);
+            }
+
+            
+
+            // move color gradients 
+            // TODO: associate speed factor factors (5,3) with each gradient set
+            // TODO: allow negative speeds
+            // FIXME: remove magic numbers in offset_offset calc (got it by trial and error)
             if(gradientMotionSet){
-                gradientOffset += 5;//13;
-                if(gradientOffset>2047){ gradientOffset = 0; }
-                gradientOffsetB -= 3;//7;
-                if(gradientOffsetB<0){ gradientOffsetB = 2047; }
+                double d = gradient_timer.elapsed();
+                gradient_timer.reset();
+                double offset_offset = 5*speedFactors[speedFactorIndex]*(1.0/d/160.0);
+                gradientOffsetA += 5*offset_offset; // 5, 13;
+                if(gradientOffsetA>2047.0){ gradientOffsetA = 0.0; }
+                gradientOffsetB -= 3*offset_offset; // 3, 7;
+                if(gradientOffsetB<0.0){ gradientOffsetB = 2047.0; }
+            }
+
+            if(outlines[outline_index] == "bright"){
+                cv::Mat cv_buffer(bufferHeight, bufferWidth, CV_16UC1 );
+                memcpy( cv_buffer.data, procDepth, bufferWidth*bufferHeight*sizeof(uint16_t) );
+                cv_buffer.convertTo(cv_buffer, CV_8UC1, 256/2048.0);
+
+                int scale = 1;
+                int delta = 0;              
+                int ddepth = CV_16S;                
+                cv::Mat blurred;
+                cv::GaussianBlur( cv_buffer, blurred, cv::Size(3,3), 0, 0, cv::BORDER_REFLECT );
+                cv::Mat grad_x, grad_y;
+                cv::Mat abs_grad_x, abs_grad_y;
+                cv::Sobel( blurred, grad_x, ddepth, 1, 0, 3, scale, delta, cv::BORDER_DEFAULT );
+                cv::Sobel( blurred, grad_y, ddepth, 0, 1, 3, scale, delta, cv::BORDER_DEFAULT );
+                cv::convertScaleAbs( grad_x, abs_grad_x );
+                cv::convertScaleAbs( grad_y, abs_grad_y );
+                cv::addWeighted( abs_grad_x, 0.5, abs_grad_y, 0.5, 0, grad );
+
+                // add grad to itself a few times to brighten
+                for(int i=0; i<6; i++){    
+                    cv::add(grad, grad, grad);
+                }
+                //cv::GaussianBlur(grad, grad, cv::Size(3,3), 0, 0, cv::BORDER_REFLECT);                
+
+                // scale to max grad
+                double minVal; 
+                double maxVal; 
+                cv::Point minLoc; 
+                cv::Point maxLoc;
+                cv::minMaxLoc( grad, &minVal, &maxVal, &minLoc, &maxLoc );
+                float scale_factor = 255.0/maxVal;
+                cv::convertScaleAbs( grad, grad, scale_factor);
+
+                cv::cvtColor(grad, grad, CV_GRAY2RGB);
             }
 
             // create combined gradient using both gradients at current offsets
+            float gradient_period = gradient_periods[gradient_period_index];
             for(int i=0; i<2048; i++){
-                int k = i+gradientOffset;
-                int j = i+gradientOffsetB;
-                // wraparound
-                if(k>2047){ k=k-2048; }
-                if(j>2047){ j=j-2048; }   
-                gradientMod[3*i  ] = MAX( 0, gradient[3*j  ]-gradientB[3*k  ]);
-                gradientMod[3*i+1] = MAX( 0, gradient[3*j+1]-gradientB[3*k+1] );
-                gradientMod[3*i+2] = MAX( 0, gradient[3*j+2]-gradientB[3*k+2] );
+                // calc offset and scaled index taking into account wraparound
+                int k = (2048+(int)round((i+gradientOffsetA)/gradient_period))%2048;
+                int j = (2048+(int)round((i+gradientOffsetB)/gradient_period))%2048; 
+                gradientMod[3*i  ] = (uint8_t) MIN(255, MAX( 0, gradient_a[gradient_index][3*j  ]-gradient_b[gradient_index][3*k  ] ));
+                gradientMod[3*i+1] = (uint8_t) MIN(255, MAX( 0, gradient_a[gradient_index][3*j+1]-gradient_b[gradient_index][3*k+1] ));
+                gradientMod[3*i+2] = (uint8_t) MIN(255, MAX( 0, gradient_a[gradient_index][3*j+2]-gradient_b[gradient_index][3*k+2] ));
             }
-            
+
             // dim the colors by given factor
+            // FIXME: doesn't seem to affect top and bottom row?
             for(int i=0; i<2048*3; i++){
                 gradientMod[i] = (uint8_t)(gradientMod[i]/brightnessFactor);
             }
 
             // convert depth map values to gradient colors
-            for( unsigned int x=2 ; x<bufferWidth-5; x++){
-                for( unsigned int y=1; y<bufferHeight-1; y++) {
+            // skip a few border pixels that seem to flicker
+            for( unsigned int x=2 ; x<bufferWidth-4; x++){
+                for( unsigned int y=1; y<bufferHeight-2; y++) {
                     unsigned int i = y*bufferWidth + x;
                     unsigned int pval = (unsigned int)m_gamma[procDepth[i]];
+                    if(3*int(pval)+2 >= 2048*3){
+                        std::cout << "gradientMod out of bounds" << std::endl;
+                        std::cout << "pval: " << pval << std::endl;
+                        std::cout << "m_gamma[procDepth[i]]: " << m_gamma[procDepth[i]] << std::endl;
+                        std::cout << "procDepth[i]: " << procDepth[i] << std::endl;
+                        std::cout << "i: " << i << std::endl;
+                        std::cout << "x: " << x << std::endl;
+                        std::cout << "y: " << y << std::endl;
+                    }
+
                     m_buffer_depth[3*i+0] = gradientMod[3*pval+0];
                     m_buffer_depth[3*i+1] = gradientMod[3*pval+1];
                     m_buffer_depth[3*i+2] = gradientMod[3*pval+2];
                 }
             }
+
+            // darken outlines
+            if(outlines[outline_index] == "dark"){
+                cv::Mat colored_buffer(bufferHeight, bufferWidth, CV_8UC3);
+                for (uint y=0; y<bufferHeight; y++){
+                    for (uint x=0; x<bufferWidth; x++){
+                        unsigned int i = y*bufferWidth + x;
+                        colored_buffer.at<cv::Vec3b>(y,x)[0] = m_buffer_depth[3*i+0];
+                        colored_buffer.at<cv::Vec3b>(y,x)[1] = m_buffer_depth[3*i+1];
+                        colored_buffer.at<cv::Vec3b>(y,x)[2] = m_buffer_depth[3*i+2];                    
+                    }
+                }              
+
+                cv::subtract(cv::Scalar::all(255), grad, grad);
+                cv::multiply(grad, colored_buffer, colored_buffer, 1/255.0);
+                
+                // convert mat back to vector format
+                // FIXME: keep consistent multi-dim array format
+                for (uint y=0; y<bufferHeight; y++){
+                    for (uint x=0; x<bufferWidth; x++){
+                        unsigned int i = y*bufferWidth + x;
+                        m_buffer_depth[3*i+0] = colored_buffer.at<cv::Vec3b>(y,x)[0];
+                        m_buffer_depth[3*i+1] = colored_buffer.at<cv::Vec3b>(y,x)[1];
+                        m_buffer_depth[3*i+2] = colored_buffer.at<cv::Vec3b>(y,x)[2];                    
+                    }
+                }   
+            }
+
+            // brighten outlines
+            if(outlines[outline_index] == "bright"){
+                cv::Mat colored_buffer(bufferHeight, bufferWidth, CV_8UC3);
+                for (uint y=0; y<bufferHeight; y++){
+                    for (uint x=0; x<bufferWidth; x++){
+                        unsigned int i = y*bufferWidth + x;
+                        colored_buffer.at<cv::Vec3b>(y,x)[0] = m_buffer_depth[3*i+0];
+                        colored_buffer.at<cv::Vec3b>(y,x)[1] = m_buffer_depth[3*i+1];
+                        colored_buffer.at<cv::Vec3b>(y,x)[2] = m_buffer_depth[3*i+2];                    
+                    }
+                }              
+
+                cv::multiply(grad, colored_buffer, colored_buffer, 1/255.0);
+                
+                // convert mat back to vector format
+                // FIXME: keep consistent multi-dim array format
+                for (uint y=0; y<bufferHeight; y++){
+                    for (uint x=0; x<bufferWidth; x++){
+                        unsigned int i = y*bufferWidth + x;
+                        m_buffer_depth[3*i+0] = colored_buffer.at<cv::Vec3b>(y,x)[0];
+                        m_buffer_depth[3*i+1] = colored_buffer.at<cv::Vec3b>(y,x)[1];
+                        m_buffer_depth[3*i+2] = colored_buffer.at<cv::Vec3b>(y,x)[2];                    
+                    }
+                }   
+            }
+
             m_new_depth_frame = true;
             m_depth_mutex.unlock();
         }
@@ -529,12 +857,6 @@ void keyPressed(unsigned char key, int x, int y)
     case 'Q':
         device->setLed(LED_RED);
         freenect_angle = 0;
-        //glutReshapeWindow(640, 480);
-        //fullscreen = false;
-        //freenect_stop_depth(device);
-	//freenect_stop_video(device);
-	//freenect_close_device(device);
-	//freenect_shutdown(f_ctx);
         glutDestroyWindow(window);
         break;
     case 'h':
@@ -556,7 +878,7 @@ void keyPressed(unsigned char key, int x, int y)
     case ' ':
         hackyTimer = 0;
         break;
-    case 'm':
+    /*case 'm':
     case 'M':
         medianFilterSet = !medianFilterSet;
         if (medianFilterSet){
@@ -573,14 +895,48 @@ void keyPressed(unsigned char key, int x, int y)
         }else{
             setOutputString("In-painting is OFF");
         }
+        break;*/
+    case 'c':
+    case 'C':
+        gradient_index++;
+        if (gradient_index>=gradient_a.size()){
+            gradient_index = 0;
+        }
+        sprintf(outputCharBuf,"Color index is now %i", gradient_index);
+        setOutputString(outputCharBuf);
         break;
-    case 'g':
-    case 'G':
-        gradientMotionSet = !gradientMotionSet;
-        if (gradientMotionSet){
-            setOutputString("Color gradient movement is ON");
+    case 'p':
+    case 'P':
+        posterizeSet = !posterizeSet;
+        if (posterizeSet){
+            setOutputString("Posterize is ON");
         }else{
-            setOutputString("Color gradient movement is OFF");
+            setOutputString("Posterize is OFF");
+        }
+        break;
+    case 'o':
+    case 'O':
+        outline_index++;
+        if (outline_index>=outlines.size()){outline_index=0;}
+        sprintf(outputCharBuf,"Outline style is now %s", outlines[outline_index].c_str());
+        setOutputString(outputCharBuf);
+        break;
+    case 'l':
+    case 'L':
+        circularSet = !circularSet;
+        if (circularSet){
+            setOutputString("Loop is ON");
+        }else{
+            setOutputString("Loop is OFF");
+        }
+        break;
+    case 't':
+    case 'T':
+        showFPSset = !showFPSset;
+        if (showFPSset){
+            setOutputString("Show FPS is ON");
+        }else{
+            setOutputString("Show FPS is OFF");
         }
         break;
     case 'f':
@@ -600,6 +956,72 @@ void keyPressed(unsigned char key, int x, int y)
             setOutputString("Fullscreen ON");
         }
         break;
+    case '1':
+        gradient_index = 1;
+        speedFactorIndex = 3;
+        gradient_period_index = 4;
+        posterizeSet = true;
+        outline_index = 3;
+        currentBuffers = 35;
+        break;
+    case '2':
+        gradient_index = 2;
+        speedFactorIndex = 2;
+        gradient_period_index = 0;
+        posterizeSet = false;
+        outline_index = 2;
+        currentBuffers = 13;
+        break;
+    case '3':
+        gradient_index = 4;
+        speedFactorIndex = 5;
+        gradient_period_index = 4;
+        posterizeSet = false;
+        outline_index = 2;
+        currentBuffers = 20;
+        break;
+    case '4':
+        gradient_index = 0;
+        speedFactorIndex = 1;
+        gradient_period_index = 5;
+        posterizeSet = false;
+        outline_index = 3;
+        currentBuffers = 45;
+        break;
+    // FIXME: rapid switching between preset 5 and any other preset 
+    //        results in openCV error: sizes of input arguments do not match
+    case '5':
+        gradient_index = 0;
+        speedFactorIndex = 5;
+        gradient_period_index = 7;
+        posterizeSet = false;
+        outline_index = 1;
+        currentBuffers = 7;
+        break;
+    case '6':
+        gradient_index = 1;
+        speedFactorIndex = 2;
+        gradient_period_index = 2;
+        posterizeSet = false;
+        outline_index = 2;
+        currentBuffers = 35;
+        break;
+    case '7':
+        gradient_index = 0;
+        speedFactorIndex = 1;
+        gradient_period_index = 0;
+        posterizeSet = false;
+        outline_index = 0;
+        currentBuffers = 35;
+        break;
+    case '8':
+        gradient_index = 4;
+        speedFactorIndex = 1;
+        gradient_period_index = 2;
+        posterizeSet = false;
+        outline_index = 1;
+        currentBuffers = 20;
+        break;
     case '-':
     case '_':
         currentBuffers--;
@@ -612,6 +1034,34 @@ void keyPressed(unsigned char key, int x, int y)
         currentBuffers++;
         if (currentBuffers > maxBuffers ){ currentBuffers = maxBuffers; }
         sprintf(outputCharBuf,"Number of buffers is now %i", currentBuffers);
+        setOutputString(outputCharBuf);
+        break;
+    case '0':
+    case ')':
+        speedFactorIndex += 1;
+        if (speedFactorIndex >= speedFactors.size() ){ speedFactorIndex = speedFactors.size()-1; }
+        sprintf(outputCharBuf,"Speed factor is now %.2f", speedFactors[speedFactorIndex]);
+        setOutputString(outputCharBuf);
+        break;
+    case '9':
+    case '(':
+        speedFactorIndex -= 1;
+        if (speedFactorIndex < 0 ){ speedFactorIndex = 0; }
+        sprintf(outputCharBuf,"Speed factor is now %.2f", speedFactors[speedFactorIndex]);
+        setOutputString(outputCharBuf);
+        break;
+    case '\'':
+    case '"':
+        gradient_period_index += 1;
+        if (gradient_period_index >= gradient_periods.size() ){ gradient_period_index = gradient_periods.size()-1; }
+        sprintf(outputCharBuf,"Gradient period is now %.3f", gradient_periods[gradient_period_index]);
+        setOutputString(outputCharBuf);
+        break;
+    case ':':
+    case ';':
+        gradient_period_index -= 1;
+        if (gradient_period_index < 0 ){ gradient_period_index = 0; }
+        sprintf(outputCharBuf,"Gradient period is now %.3f", gradient_periods[gradient_period_index]);
         setOutputString(outputCharBuf);
         break;
     case '[':
@@ -654,19 +1104,61 @@ void renderBitmapString(
 		float y,
 		float z,
 		void* font,
-		char* string) {
+		std::string s,
+        int decimals = 100000) {
     char* c;
     int yOffset = 0;
     int maxY = glutGet(GLUT_WINDOW_HEIGHT);
     int maxX = glutGet(GLUT_WINDOW_WIDTH);
     glWindowPos3f(x*maxX/640, maxY-y, z);
-    for (c=string; *c != '\0'; c++) {
-        if (*c=='\n'){ 
+    int d = -1;
+    bool past_dot = false;
+    for (char& c : s) {      
+        if (c=='.'){
+            if ( decimals==0 ){
+                return;
+            } else {
+                past_dot = true;
+            }
+        }
+        if ( past_dot ){
+            d++;
+        }
+        if ( d > decimals ){
+            return;
+        }
+        if (c=='\n'){ 
             yOffset -= lineSpacing; 
             glWindowPos3f(x*maxX/640, maxY-y+yOffset, z); 
         }
-        glutBitmapCharacter(font, *c);
+        glutBitmapCharacter(font, c);
     }
+}
+
+void renderOutlinedString(float x,
+                          float y,
+                          std::string s,
+                          int decimals = 100000) {
+    // x = 40.0f
+    // y = 80.0f
+    // disable lighting and texture so text color comes through
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    // first draw a jittered version of the string to create a dark outline around the text
+    glColor3d(0.2, 0.0, 0.0);
+    renderBitmapString( windowPad+x,y,-0.5f, font, s, decimals);
+    renderBitmapString( windowPad+x+1.0f,y+1.0f,-0.5f, font, s, decimals);
+    renderBitmapString( windowPad+x+1.0f,y,-0.5f, font, s, decimals);
+    renderBitmapString( windowPad+x-1.0f,y-1.0f,-0.5f, font, s, decimals);
+    renderBitmapString( windowPad+x-1.0f,y,-0.5f, font, s, decimals);
+    renderBitmapString( windowPad+x-1.0f,y+1.0f,-0.5f, font, s, decimals);
+    renderBitmapString( windowPad+x,y+1.0f,-0.5f, font, s, decimals);
+    renderBitmapString( windowPad+x+1.0f,y-1.0f,-0.5f, font, s, decimals);
+    renderBitmapString( windowPad+x,y-1.0f,-0.5f, font, s, decimals);
+    // now draw main text on top
+    glColor3d(0.4, 1.0, 0.7);
+    renderBitmapString( windowPad+x,y,-0.5f, font, s, decimals);
+
 }
 
 void DrawGLScene()
@@ -700,23 +1192,14 @@ void DrawGLScene()
     if (hackyTimer < 0){ hackyTimer = 0; outputString = ""; lineSpacing=25;}    
 
     // render user notifications
-    // disable lighting and texture so text color comes through
-    glDisable(GL_LIGHTING);
-    glDisable(GL_TEXTURE_2D);
-    // first draw a jittered version of the string to create a dark outline around the text
-    glColor3d(0.2, 0.0, 0.0);
-    renderBitmapString( windowPad+40.0f,80.0f,-0.5f, font, outputString);
-    renderBitmapString( windowPad+41.0f,81.0f,-0.5f, font, outputString);
-    renderBitmapString( windowPad+41.0f,80.0f,-0.5f, font, outputString);
-    renderBitmapString( windowPad+39.0f,79.0f,-0.5f, font, outputString);
-    renderBitmapString( windowPad+39.0f,80.0f,-0.5f, font, outputString);
-    renderBitmapString( windowPad+39.0f,81.0f,-0.5f, font, outputString);
-    renderBitmapString( windowPad+40.0f,81.0f,-0.5f, font, outputString);
-    renderBitmapString( windowPad+41.0f,79.0f,-0.5f, font, outputString);
-    renderBitmapString( windowPad+40.0f,79.0f,-0.5f, font, outputString);
-    // now draw main text on top
-    glColor3d(0.4, 1.0, 0.7);
-    renderBitmapString( windowPad+40.0f,80.0f,-0.5f, font, outputString);
+    renderOutlinedString(40.0f, 80.0f, outputString);
+
+    if(showFPSset){
+        double d = fps_timer.elapsed();
+        fps_timer.reset(); 
+        std::string s = std::to_string(1.0f/d);
+        renderOutlinedString(40.0f, 60.0f, s, 0);            
+    }
 
     glutSwapBuffers();
 }
@@ -755,9 +1238,14 @@ void displayKinectData(MyFreenectDevice* device){
     glutMainLoop();
 }
 
+void init(){
+    initGradients();
+}
 
 //define main function
 int main(int argc, char **argv) {
+    init();
+
     device = &freenect.createDevice<MyFreenectDevice>(0);
     // do this a few times - for some reason fails on the first try sometimes
     device = &freenect.createDevice<MyFreenectDevice>(0);
