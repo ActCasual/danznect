@@ -51,6 +51,9 @@
  * either License.
  */
 
+// TODO: store default presets in an external file, and let user define new ones with a hotkey
+// TODO: add a mirror option (flip the screen horizontally)
+// TODO: add fog that works with bright outlines (i.e. hide back wall if wanted)
 // FIXME: move all buffer allocations to main() (although compiler optimization
 //        might already take care of this)
 // TODO: build with debug symbols, perform random stack stops to find slow parts of code
@@ -69,7 +72,6 @@
 // TODO: option to to save video from this program
 // TODO: other gradient interpolation options (e.g. thresholded rather than interpolated)
 
-// TODO:  use numbers for selecting overall presets (combos of gradients, periods, speeds, and effects)
 // TODO: use shift-numbers held down to trigger temporary "rolls" - will require class to convert between temp and current options 
 
 // TODO: option to hide notifications
@@ -131,6 +133,7 @@ Timer fps_timer = Timer();
 Timer gradient_timer = Timer();
 
 // global options
+bool mirrorSet = true;
 bool medianFilterSet = true;
 bool inPaintSet = true;
 bool gradientMotionSet = true;
@@ -144,8 +147,16 @@ unsigned int bufferHeight = 240;
 unsigned int currentBuffers = 45;
 float brightnessFactor = 1;
 //float speedFactor = 1.0;
-std::vector<float> speedFactors = {0.0, 0.06, 0.1, 0.5, 1.0, 2.0, 3.0};
-int speedFactorIndex = 3;
+//std::vector<float> speedFactors = {0.0, 0.01, 0.06, 0.1, 0.5, 1.0, 2.0, 3.0};
+std::vector<float> speedFactors = {0.0, 0.03, 0.08, 0.1, 0.5, 2.0, 3.0, 10.0};
+int speedFactorIndex = 4;
+
+bool fogSet = false;
+std::vector<float> fogStarts = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
+float fogDepth = 0.05;
+int fogIndex = 4;
+float fogStart = fogStarts[fogIndex];
+float fogEnd = fogStart + fogDepth;
 
 std::vector<std::string> outlines = {"none", "rainbow", "bright", "dark"};
 int outline_index = 0;
@@ -242,7 +253,6 @@ uint16_t opt_med9(uint16_t* p){
 #undef PIX_SWAP
 #undef PIX_SORT
 
-// FIXME: getting discontinuities, probably for non 1.0 periods
 vector<uint8_t> makeGradient(vector<int> r, 
                              vector<int> g,
                              vector<int> b,
@@ -524,6 +534,7 @@ class MyFreenectDevice : public Freenect::FreenectDevice {
         uint16_t* procDepth;
         //std::vector<uint16_t        
 
+        // FIXME: update these var names, m_buffer_depth holds RGB vals
         MyFreenectDevice(freenect_context *_ctx, int _index) : Freenect::FreenectDevice(_ctx, _index),
               m_buffer_depth(bufferWidth*bufferHeight*3), 
               m_gamma(2048), 
@@ -541,8 +552,9 @@ class MyFreenectDevice : public Freenect::FreenectDevice {
 
             for( unsigned int i = 0 ; i < 2048 ; i++) {
                 float v = i/2048.0;
-                v = pow(v, 3)* 6;
-                m_gamma[i] = v*256; // v*6*256 (old version bug)
+                //v = pow(v, 3)* 6; // This was probably a bug?
+                v = pow(v,3)*8; // pow(v,3)*6 was original - exaggerates depths in foreground and limits upper end to ~1500?
+                m_gamma[i] = v*256;
                 if(m_gamma[i]>2047){
                     std::cout << "m_gamma[i] > 2047" << std::endl;
                 }
@@ -736,7 +748,6 @@ class MyFreenectDevice : public Freenect::FreenectDevice {
             }
 
             // dim the colors by given factor
-            // FIXME: doesn't seem to affect top and bottom row?
             for(int i=0; i<2048*3; i++){
                 gradientMod[i] = (uint8_t)(gradientMod[i]/brightnessFactor);
             }
@@ -814,6 +825,34 @@ class MyFreenectDevice : public Freenect::FreenectDevice {
                         m_buffer_depth[3*i+2] = colored_buffer.at<cv::Vec3b>(y,x)[2];                    
                     }
                 }   
+            }
+
+            if(fogSet){
+                for( unsigned int x=0 ; x<bufferWidth; x++){
+                    for( unsigned int y=0; y<bufferHeight; y++) {
+                        unsigned int i = y*bufferWidth + x;
+                        double depth = procDepth[i];
+                        //if (x==0){
+                        //    std::cout << "procDepth[" << i << "]: " << depth << std::endl;
+                        //}
+                        double norm_depth = depth/2048.0;
+                        if (norm_depth < fogStart){
+                            continue;
+                        }
+                        double factor = 0.0;
+                        if (norm_depth < fogEnd){
+                            factor = 1.0-(norm_depth-fogStart)/(fogEnd-fogStart);
+                            //if (x==0){
+                            //    std::cout << "factor: " << factor << std::endl;
+                            //}
+                        }
+                        // just darkening all channels toward 0 for now
+                        // TODO: support first color in current gradient and blend
+                        for( unsigned int n=0; n<3; n++) {
+                            m_buffer_depth[3*i+n] = (uint8_t)(m_buffer_depth[3*i+n] * factor);
+                        }
+                    }
+                }
             }
 
             m_new_depth_frame = true;
@@ -905,6 +944,31 @@ void keyPressed(unsigned char key, int x, int y)
         sprintf(outputCharBuf,"Color index is now %i", gradient_index);
         setOutputString(outputCharBuf);
         break;
+    case 'b':
+    case 'B':
+        fogSet = !fogSet;
+        if (fogSet){
+            setOutputString("Fog is ON");
+        }else{
+            setOutputString("Fog is OFF");
+        }
+        break;
+    case 'v':
+        fogIndex += 1;
+        if (fogIndex >= fogStarts.size()){ fogIndex = fogStarts.size()-1; }
+        fogStart = fogStarts[fogIndex];
+		fogEnd = fogStart + fogDepth;
+        sprintf(outputCharBuf, "FogStart is now %.3f", fogStarts[fogIndex]);
+        setOutputString(outputCharBuf);
+        break;
+    case 'n':
+        fogIndex -= 1;
+        if (fogIndex < 0){ fogIndex = 0; }
+        fogStart = fogStarts[fogIndex];
+		fogEnd = fogStart + fogDepth;
+        sprintf(outputCharBuf, "FogStart is now %.3f", fogStarts[fogIndex]);
+        setOutputString(outputCharBuf);
+        break;
     case 'p':
     case 'P':
         posterizeSet = !posterizeSet;
@@ -930,13 +994,22 @@ void keyPressed(unsigned char key, int x, int y)
             setOutputString("Loop is OFF");
         }
         break;
-    case 't':
-    case 'T':
+    case 's':
+    case 'S':
         showFPSset = !showFPSset;
         if (showFPSset){
             setOutputString("Show FPS is ON");
         }else{
             setOutputString("Show FPS is OFF");
+        }
+        break;
+    case 'm':
+    case 'M':
+        mirrorSet = !mirrorSet;
+        if (mirrorSet){
+            setOutputString("Display is flipped");
+        }else{
+            setOutputString("Display is not flipped");
         }
         break;
     case 'f':
@@ -990,15 +1063,16 @@ void keyPressed(unsigned char key, int x, int y)
         break;
     // FIXME: rapid switching between preset 5 and any other preset 
     //        results in openCV error: sizes of input arguments do not match
-    case '5':
+    // - disabling for now, glitchy outlines weren't that cool anyway
+    /*case '5':
         gradient_index = 0;
         speedFactorIndex = 5;
         gradient_period_index = 7;
         posterizeSet = false;
         outline_index = 1;
         currentBuffers = 7;
-        break;
-    case '6':
+        break;*/
+    case '5':
         gradient_index = 1;
         speedFactorIndex = 2;
         gradient_period_index = 2;
@@ -1006,7 +1080,7 @@ void keyPressed(unsigned char key, int x, int y)
         outline_index = 2;
         currentBuffers = 35;
         break;
-    case '7':
+    case '6':
         gradient_index = 0;
         speedFactorIndex = 1;
         gradient_period_index = 0;
@@ -1014,7 +1088,7 @@ void keyPressed(unsigned char key, int x, int y)
         outline_index = 0;
         currentBuffers = 35;
         break;
-    case '8':
+    case '7':
         gradient_index = 4;
         speedFactorIndex = 1;
         gradient_period_index = 2;
@@ -1181,10 +1255,10 @@ void DrawGLScene()
 
     glBegin(GL_TRIANGLE_FAN);
     glColor4f(255.0f, 255.0f, 255.0f, 255.0f);
-    glTexCoord2f(0, 0); glVertex3f(windowPad,0,-1);
-    glTexCoord2f(1, 0); glVertex3f(640-windowPad,0,-1);
-    glTexCoord2f(1, 1); glVertex3f(640-windowPad,480,-1);
-    glTexCoord2f(0, 1); glVertex3f(windowPad,480,-1);
+    glTexCoord2f(mirrorSet, 0); glVertex3f(windowPad,0,-1);
+    glTexCoord2f(!mirrorSet, 0); glVertex3f(640-windowPad,0,-1);
+    glTexCoord2f(!mirrorSet, 1); glVertex3f(640-windowPad,480,-1);
+    glTexCoord2f(mirrorSet, 1); glVertex3f(windowPad,480,-1);
     glEnd();
 
     // countdown user notification timer, blank if 0
