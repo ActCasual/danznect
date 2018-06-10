@@ -86,6 +86,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <queue>
 #include <cmath>
 #include <pthread.h>
 #include <unistd.h>
@@ -252,7 +253,16 @@ public:
 };
 
 
-
+map<string,string> shift_nums = {
+{"!","1"},
+{"@","2"},
+{"#","3"},
+{"$","4"},
+{"%","5"},
+{"^","6"},
+{"&","7"},
+{"*","8"},
+};
 
 // define presets
 map<string,Params> presets;
@@ -269,12 +279,36 @@ void init_presets() {
 
 struct Event {
     string preset;
+    bool running;
     double duration; // in seconds
 };
 
 Params stored_params;
-std::deque<Event> events;
+queue<Event> events;
 
+// set stored params on addition to event queue if len 0
+// set global params to stored params if len 0
+
+void poll_event_queue() {
+    if (events.size() > 0) {
+        if (not events.front().running) { 
+            event_timer.reset();
+            events.front().running = true;
+        } else {
+            if (event_timer.elapsed() > events.front().duration) {
+                events.pop();
+            }
+        }
+    }
+}
+
+void add_event(string preset, double duration) {
+    // store current params for restore
+    if (events.size() == 0) {
+        stored_params.get_global();
+    }
+    events.push(Event{preset, duration});
+}
 
 //define OpenGL variables
 GLuint gl_depth_tex;
@@ -1200,6 +1234,16 @@ void keyPressed(unsigned char key, int x, int y)
             p.set_global();
         }
         break;
+    case '!':
+    case '@':
+    case '#':
+    case '$':
+    case '%':
+    case '^':
+    case '&':
+    case '*':
+        add_event(shift_nums[to_string((int)key)], 5);
+        break;
     case '-':
     case '_':
         currentBuffers--;
@@ -1342,6 +1386,8 @@ void renderOutlinedString(float x,
 
 void DrawGLScene()
 {
+    poll_event_queue();
+
     static std::vector<uint8_t> depth(bufferWidth*bufferHeight*4);
 
     device->updateState();
