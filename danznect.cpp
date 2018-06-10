@@ -118,49 +118,6 @@ using namespace std;
 //        - key by time submitted
 //        - vals: preset params object, time to activate, time to deactivate (0 to indicate never deactivate)
 
-class Params
-{
-public:
-    int gradient_index;
-    int speedFactorIndex;
-    int gradient_period_index;
-    bool posterizeSet;
-    int outline_index;
-    int currentBuffers;
-    Params() {}
-    Params(int gi, int sfi, int gpi, bool ps, int oi, int cb) {
-        gradient_index = gi;
-        speedFactorIndex = sfi;
-        gradient_period_index = gpi;
-        posterizeSet = ps;
-        outline_index = oi;
-        currentBuffers = cb;  
-    }
-    void set(int gi, int sfi, int gpi, bool ps, int oi, int cb) {
-        gradient_index = gi;
-        speedFactorIndex = sfi;
-        gradient_period_index = gpi;
-        posterizeSet = ps;
-        outline_index = oi;
-        currentBuffers = cb;  
-    }
-    void set_global() {
-        gradient_index = this->gradient_index;
-        speedFactorIndex = this->speedFactorIndex;
-        gradient_period_index = this->gradient_period_index;
-        posterizeSet = this->posterizeSet;
-        outline_index = this->outline_index;
-        currentBuffers = this->currentBuffers;  
-    }
-    void get_global() {
-        this->gradient_index = gradient_index;
-        this->speedFactorIndex = speedFactorIndex;
-        this->gradient_period_index = gradient_period_index;
-        this->posterizeSet = posterizeSet;
-        this->outline_index = outline_index;
-        this->currentBuffers = currentBuffers;          
-    }
-};
 
 class Timer // from https://gist.github.com/gongzhitaao/7062087
 {
@@ -181,26 +138,7 @@ Timer fps_timer = Timer();
 Timer gradient_timer = Timer();
 Timer event_timer = Timer();
 
-// define presets
-map<string,Params> presets;
-void init_presets() {
-    presets["1"] = Params(1,3, 4, true, 3, 35);
-    presets["2"] = Params(2,2,0,false,2,13);
-    presets["3"] = Params(4,5,4,false,2,20);
-    presets["4"] = Params(0,1,5,false,3,45);
-    presets["5"] = Params(1,2,2,false,2,35);
-    presets["6"] = Params(0,1,0,false,0,35);
-    presets["7"] = Params(4,1,2,false,1,20);
-    presets["8"] = Params(0,3,4,false,2,20);
-}
 
-struct Event {
-    string preset;
-    double duration; // in seconds
-};
-
-Params stored_params;
-std::deque<Event> events;
 
 // global options
 // FIXME: move to a params object so presets can be encapsulated
@@ -267,6 +205,75 @@ void setOutputString(char* s)
     outputString = s;
     hackyTimer = 100;
 }
+
+
+class Params
+{
+public:
+    int gradient_index;
+    int speedFactorIndex;
+    int gradient_period_index;
+    bool posterizeSet;
+    int outline_index;
+    int currentBuffers;
+    Params() {}
+    Params(int gi, int sfi, int gpi, bool ps, int oi, int cb) {
+        gradient_index = gi;
+        speedFactorIndex = sfi;
+        gradient_period_index = gpi;
+        posterizeSet = ps;
+        outline_index = oi;
+        currentBuffers = cb;  
+    }
+    void set(int gi, int sfi, int gpi, bool ps, int oi, int cb) {
+        gradient_index = gi;
+        speedFactorIndex = sfi;
+        gradient_period_index = gpi;
+        posterizeSet = ps;
+        outline_index = oi;
+        currentBuffers = cb;  
+    }
+    void set_global() {
+        ::gradient_index = this->gradient_index;
+        ::speedFactorIndex = this->speedFactorIndex;
+        ::gradient_period_index = this->gradient_period_index;
+        ::posterizeSet = this->posterizeSet;
+        ::outline_index = this->outline_index;
+        ::currentBuffers = this->currentBuffers;  
+    }
+    void get_global() {
+        this->gradient_index = gradient_index;
+        this->speedFactorIndex = speedFactorIndex;
+        this->gradient_period_index = gradient_period_index;
+        this->posterizeSet = posterizeSet;
+        this->outline_index = outline_index;
+        this->currentBuffers = currentBuffers;          
+    }
+};
+
+
+
+
+// define presets
+map<string,Params> presets;
+void init_presets() {
+    presets["1"] = Params(1,3, 4, true, 3, 35);
+    presets["2"] = Params(2,2,0,false,2,13);
+    presets["3"] = Params(4,5,4,false,2,20);
+    presets["4"] = Params(0,1,5,false,3,45);
+    presets["5"] = Params(1,2,2,false,2,35);
+    presets["6"] = Params(0,1,0,false,0,35);
+    presets["7"] = Params(4,1,2,false,1,20);
+    presets["8"] = Params(0,3,4,false,2,20);
+}
+
+struct Event {
+    string preset;
+    double duration; // in seconds
+};
+
+Params stored_params;
+std::deque<Event> events;
 
 
 //define OpenGL variables
