@@ -87,6 +87,7 @@
 #include <string>
 #include <vector>
 #include <queue>
+#include <bitset>
 #include <cmath>
 #include <pthread.h>
 #include <unistd.h>
@@ -222,9 +223,9 @@ public:
     int gradient_period_index;
     bool posterizeSet;
     int outline_index;
-    int currentBuffers;
+    unsigned int currentBuffers;
     Params() {}
-    Params(int gi, int sfi, int gpi, bool ps, int oi, int cb) {
+    Params(int gi, int sfi, int gpi, bool ps, int oi, unsigned int cb) {
         gradient_index = gi;
         speedFactorIndex = sfi;
         gradient_period_index = gpi;
@@ -232,7 +233,7 @@ public:
         outline_index = oi;
         currentBuffers = cb;  
     }
-    void set(int gi, int sfi, int gpi, bool ps, int oi, int cb) {
+    void set(int gi, int sfi, int gpi, bool ps, int oi, unsigned int cb) {
         gradient_index = gi;
         speedFactorIndex = sfi;
         gradient_period_index = gpi;
@@ -291,6 +292,7 @@ struct Event {
 
 Params stored_params;
 queue<Event> events;
+double event_duration = 5;
 
 // set stored params on addition to event queue if len 0
 // set global params to stored params if len 0
@@ -298,6 +300,7 @@ queue<Event> events;
 void poll_event_queue() {
     if (events.size() > 0) {
         if (not events.front().running) { 
+            presets.at(events.front().preset).set_global();
             event_timer.reset();
             events.front().running = true;
         } else {
@@ -316,7 +319,7 @@ void add_event(string preset, double duration) {
     if (events.size() == 0) {
         stored_params.get_global();
     }
-    events.push(Event{preset, duration});
+    events.push(Event{preset, false, duration});
     setOutputString("Pushed event for preset "+preset);
 }
 
@@ -1017,6 +1020,19 @@ freenect_video_format requested_format(FREENECT_VIDEO_RGB);
 //glutKeyboardFunc Handler
 void keyPressed(unsigned char key, int x, int y)
 {
+    // FIXME: gotta be a more compact way of doing this conversion,
+    //        but this seems to work. std::string accepts signed char*
+    ostringstream os;
+    os << key;
+    string key_str = os.str();
+    /*cout << "key string = " << key_str << endl << flush;
+    cout << "bytes: ";
+    for (char& c : key_str)
+    {
+        bitset<8> bits(c);
+        cout <<  bits;
+    }*/
+    cout << endl << flush;
     switch(key)
     {
     case (char)27:
@@ -1165,84 +1181,14 @@ void keyPressed(unsigned char key, int x, int y)
         }
         break;
     case '1':
-        /*gradient_index = 1;
-        speedFactorIndex = 3;
-        gradient_period_index = 4;
-        posterizeSet = true;
-        outline_index = 3;
-        currentBuffers = 35;*/
-        presets["1"].set_global();
-        break;
     case '2':
-        gradient_index = 2;
-        speedFactorIndex = 2;
-        gradient_period_index = 0;
-        posterizeSet = false;
-        outline_index = 2;
-        currentBuffers = 13;
-        break;
     case '3':
-        gradient_index = 4;
-        speedFactorIndex = 5;
-        gradient_period_index = 4;
-        posterizeSet = false;
-        outline_index = 2;
-        currentBuffers = 20;
-        break;
     case '4':
-        gradient_index = 0;
-        speedFactorIndex = 1;
-        gradient_period_index = 5;
-        posterizeSet = false;
-        outline_index = 3;
-        currentBuffers = 45;
-        break;
-    // FIXME: rapid switching between preset 5 and any other preset 
-    //        results in openCV error: sizes of input arguments do not match
-    // - disabling for now, glitchy outlines weren't that cool anyway
-    /*case '5':
-        gradient_index = 0;
-        speedFactorIndex = 5;
-        gradient_period_index = 7;
-        posterizeSet = false;
-        outline_index = 1;
-        currentBuffers = 7;
-        break;*/
     case '5':
-        gradient_index = 1;
-        speedFactorIndex = 2;
-        gradient_period_index = 2;
-        posterizeSet = false;
-        outline_index = 2;
-        currentBuffers = 35;
-        break;
     case '6':
-        gradient_index = 0;
-        speedFactorIndex = 1;
-        gradient_period_index = 0;
-        posterizeSet = false;
-        outline_index = 0;
-        currentBuffers = 35;
-        break;
     case '7':
-        gradient_index = 4;
-        speedFactorIndex = 1;
-        gradient_period_index = 2;
-        posterizeSet = false;
-        outline_index = 1;
-        currentBuffers = 20;
-        break;
     case '8':
-        {
-            Params p = Params();
-            p.gradient_index = 0;
-            p.speedFactorIndex = 3;
-            p.gradient_period_index = 4;
-            p.posterizeSet = false;
-            p.outline_index = 2;
-            p.currentBuffers = 20;
-            p.set_global();
-        }
+        presets.at(key_str).set_global();
         break;
     case '!':
     case '@':
@@ -1252,7 +1198,7 @@ void keyPressed(unsigned char key, int x, int y)
     case '^':
     case '&':
     case '*':
-        add_event(shift_nums[to_string((int)key)], 200.);
+        add_event(shift_nums.at(key_str), event_duration);
         break;
     case '-':
     case '_':
