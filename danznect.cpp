@@ -133,6 +133,8 @@ Timer fps_timer = Timer();
 Timer gradient_timer = Timer();
 
 // global options
+// FIXME: move to a params object so presets can be encapsulated
+bool notificationsOn = true;
 bool mirrorSet = true;
 bool medianFilterSet = true;
 bool inPaintSet = true;
@@ -152,9 +154,9 @@ std::vector<float> speedFactors = {0.0, 0.03, 0.08, 0.1, 0.5, 2.0, 3.0, 10.0};
 int speedFactorIndex = 4;
 
 bool fogSet = false;
-std::vector<float> fogStarts = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0};
+std::vector<float> fogStarts = {0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0};
 float fogDepth = 0.05;
-int fogIndex = 4;
+int fogIndex = 8;
 float fogStart = fogStarts[fogIndex];
 float fogEnd = fogStart + fogDepth;
 
@@ -892,8 +894,6 @@ void keyPressed(unsigned char key, int x, int y)
     switch(key)
     {
     case (char)27:
-    case 'q':
-    case 'Q':
         device->setLed(LED_RED);
         freenect_angle = 0;
         glutDestroyWindow(window);
@@ -914,9 +914,9 @@ void keyPressed(unsigned char key, int x, int y)
         lineSpacing = 25;
         hackyTimer = 1000;
         break;
-    case ' ':
+    /*case ' ':
         hackyTimer = 0;
-        break;
+        break;*/
     /*case 'm':
     case 'M':
         medianFilterSet = !medianFilterSet;
@@ -944,8 +944,8 @@ void keyPressed(unsigned char key, int x, int y)
         sprintf(outputCharBuf,"Color index is now %i", gradient_index);
         setOutputString(outputCharBuf);
         break;
-    case 'b':
-    case 'B':
+    case 'w':
+    case 'W':
         fogSet = !fogSet;
         if (fogSet){
             setOutputString("Fog is ON");
@@ -953,7 +953,7 @@ void keyPressed(unsigned char key, int x, int y)
             setOutputString("Fog is OFF");
         }
         break;
-    case 'v':
+    case 'e':
         fogIndex += 1;
         if (fogIndex >= fogStarts.size()){ fogIndex = fogStarts.size()-1; }
         fogStart = fogStarts[fogIndex];
@@ -961,7 +961,7 @@ void keyPressed(unsigned char key, int x, int y)
         sprintf(outputCharBuf, "FogStart is now %.3f", fogStarts[fogIndex]);
         setOutputString(outputCharBuf);
         break;
-    case 'n':
+    case 'q':
         fogIndex -= 1;
         if (fogIndex < 0){ fogIndex = 0; }
         fogStart = fogStarts[fogIndex];
@@ -976,6 +976,15 @@ void keyPressed(unsigned char key, int x, int y)
             setOutputString("Posterize is ON");
         }else{
             setOutputString("Posterize is OFF");
+        }
+        break;
+    case 'n':
+    case 'N':
+        notificationsOn = !notificationsOn;
+        if (notificationsOn){
+            setOutputString("Notifications are ON");
+        }else{
+            setOutputString("Notifications are OFF");
         }
         break;
     case 'o':
@@ -1096,6 +1105,14 @@ void keyPressed(unsigned char key, int x, int y)
         outline_index = 1;
         currentBuffers = 20;
         break;
+    case '8':
+        gradient_index = 0;
+        speedFactorIndex = 3;
+        gradient_period_index = 4;
+        posterizeSet = false;
+        outline_index = 2;
+        currentBuffers = 20;
+        break;
     case '-':
     case '_':
         currentBuffers--;
@@ -1213,26 +1230,27 @@ void renderOutlinedString(float x,
                           float y,
                           std::string s,
                           int decimals = 100000) {
-    // x = 40.0f
-    // y = 80.0f
-    // disable lighting and texture so text color comes through
-    glDisable(GL_LIGHTING);
-    glDisable(GL_TEXTURE_2D);
-    // first draw a jittered version of the string to create a dark outline around the text
-    glColor3d(0.2, 0.0, 0.0);
-    renderBitmapString( windowPad+x,y,-0.5f, font, s, decimals);
-    renderBitmapString( windowPad+x+1.0f,y+1.0f,-0.5f, font, s, decimals);
-    renderBitmapString( windowPad+x+1.0f,y,-0.5f, font, s, decimals);
-    renderBitmapString( windowPad+x-1.0f,y-1.0f,-0.5f, font, s, decimals);
-    renderBitmapString( windowPad+x-1.0f,y,-0.5f, font, s, decimals);
-    renderBitmapString( windowPad+x-1.0f,y+1.0f,-0.5f, font, s, decimals);
-    renderBitmapString( windowPad+x,y+1.0f,-0.5f, font, s, decimals);
-    renderBitmapString( windowPad+x+1.0f,y-1.0f,-0.5f, font, s, decimals);
-    renderBitmapString( windowPad+x,y-1.0f,-0.5f, font, s, decimals);
-    // now draw main text on top
-    glColor3d(0.4, 1.0, 0.7);
-    renderBitmapString( windowPad+x,y,-0.5f, font, s, decimals);
-
+    if (notificationsOn) {
+        // x = 40.0f
+        // y = 80.0f
+        // disable lighting and texture so text color comes through
+        glDisable(GL_LIGHTING);
+        glDisable(GL_TEXTURE_2D);
+        // first draw a jittered version of the string to create a dark outline around the text
+        glColor3d(0.2, 0.0, 0.0);
+        renderBitmapString( windowPad+x,y,-0.5f, font, s, decimals);
+        renderBitmapString( windowPad+x+1.0f,y+1.0f,-0.5f, font, s, decimals);
+        renderBitmapString( windowPad+x+1.0f,y,-0.5f, font, s, decimals);
+        renderBitmapString( windowPad+x-1.0f,y-1.0f,-0.5f, font, s, decimals);
+        renderBitmapString( windowPad+x-1.0f,y,-0.5f, font, s, decimals);
+        renderBitmapString( windowPad+x-1.0f,y+1.0f,-0.5f, font, s, decimals);
+        renderBitmapString( windowPad+x,y+1.0f,-0.5f, font, s, decimals);
+        renderBitmapString( windowPad+x+1.0f,y-1.0f,-0.5f, font, s, decimals);
+        renderBitmapString( windowPad+x,y-1.0f,-0.5f, font, s, decimals);
+        // now draw main text on top
+        glColor3d(0.4, 1.0, 0.7);
+        renderBitmapString( windowPad+x,y,-0.5f, font, s, decimals);
+    }
 }
 
 void DrawGLScene()
@@ -1267,13 +1285,14 @@ void DrawGLScene()
 
     // render user notifications
     renderOutlinedString(40.0f, 80.0f, outputString);
-
+    
+    /*
     if(showFPSset){
         double d = fps_timer.elapsed();
         fps_timer.reset(); 
         std::string s = std::to_string(1.0f/d);
         renderOutlinedString(40.0f, 60.0f, s, 0);            
-    }
+    }*/
 
     glutSwapBuffers();
 }
