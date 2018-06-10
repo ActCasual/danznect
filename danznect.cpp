@@ -125,6 +125,7 @@ class Timer // from https://gist.github.com/gongzhitaao/7062087
 public:
     Timer() : beg_(clock_::now()) {}
     void reset() { beg_ = clock_::now(); }
+    // FIXME: not sure of the units here
     double elapsed() const { 
         return std::chrono::duration_cast<second_>
             (clock_::now() - beg_).count(); }
@@ -207,6 +208,11 @@ void setOutputString(char* s)
     hackyTimer = 100;
 }
 
+void setOutputString(string s)
+{
+    outputString = s.c_str();
+    hackyTimer = 100;
+}
 
 class Params
 {
@@ -297,6 +303,9 @@ void poll_event_queue() {
         } else {
             if (event_timer.elapsed() > events.front().duration) {
                 events.pop();
+                // restore previous params
+                stored_params.set_global();
+                setOutputString("end of event");
             }
         }
     }
@@ -308,6 +317,7 @@ void add_event(string preset, double duration) {
         stored_params.get_global();
     }
     events.push(Event{preset, duration});
+    setOutputString("Pushed event for preset "+preset);
 }
 
 //define OpenGL variables
@@ -1242,7 +1252,7 @@ void keyPressed(unsigned char key, int x, int y)
     case '^':
     case '&':
     case '*':
-        add_event(shift_nums[to_string((int)key)], 5);
+        add_event(shift_nums[to_string((int)key)], 200.);
         break;
     case '-':
     case '_':
