@@ -249,12 +249,12 @@ public:
         ::currentBuffers = this->currentBuffers;  
     }
     void get_global() {
-        this->gradient_index = gradient_index;
-        this->speedFactorIndex = speedFactorIndex;
-        this->gradient_period_index = gradient_period_index;
-        this->posterizeSet = posterizeSet;
-        this->outline_index = outline_index;
-        this->currentBuffers = currentBuffers;          
+        this->gradient_index = ::gradient_index;
+        this->speedFactorIndex = ::speedFactorIndex;
+        this->gradient_period_index = ::gradient_period_index;
+        this->posterizeSet = ::posterizeSet;
+        this->outline_index = ::outline_index;
+        this->currentBuffers = ::currentBuffers;          
     }
 };
 
