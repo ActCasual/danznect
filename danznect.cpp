@@ -114,6 +114,54 @@
 using namespace std;
 
 
+// FIXME: implement an event "queue". not really a queue.
+//        - key by time submitted
+//        - vals: preset params object, time to activate, time to deactivate (0 to indicate never deactivate)
+
+class Params
+{
+public:
+    int gradient_index;
+    int speedFactorIndex;
+    int gradient_period_index;
+    bool posterizeSet;
+    int outline_index;
+    int currentBuffers;
+    Params() {}
+    Params(int gi, int sfi, int gpi, bool ps, int oi, int cb) {
+        gradient_index = gi;
+        speedFactorIndex = sfi;
+        gradient_period_index = gpi;
+        posterizeSet = ps;
+        outline_index = oi;
+        currentBuffers = cb;  
+    }
+    void set(int gi, int sfi, int gpi, bool ps, int oi, int cb) {
+        gradient_index = gi;
+        speedFactorIndex = sfi;
+        gradient_period_index = gpi;
+        posterizeSet = ps;
+        outline_index = oi;
+        currentBuffers = cb;  
+    }
+    void set_global() {
+        gradient_index = this->gradient_index;
+        speedFactorIndex = this->speedFactorIndex;
+        gradient_period_index = this->gradient_period_index;
+        posterizeSet = this->posterizeSet;
+        outline_index = this->outline_index;
+        currentBuffers = this->currentBuffers;  
+    }
+    void get_global() {
+        this->gradient_index = gradient_index;
+        this->speedFactorIndex = speedFactorIndex;
+        this->gradient_period_index = gradient_period_index;
+        this->posterizeSet = posterizeSet;
+        this->outline_index = outline_index;
+        this->currentBuffers = currentBuffers;          
+    }
+};
+
 class Timer // from https://gist.github.com/gongzhitaao/7062087
 {
 public:
@@ -131,6 +179,28 @@ private:
 
 Timer fps_timer = Timer();
 Timer gradient_timer = Timer();
+Timer event_timer = Timer();
+
+// define presets
+map<string,Params> presets;
+void init_presets() {
+    presets["1"] = Params(1,3, 4, true, 3, 35);
+    presets["2"] = Params(2,2,0,false,2,13);
+    presets["3"] = Params(4,5,4,false,2,20);
+    presets["4"] = Params(0,1,5,false,3,45);
+    presets["5"] = Params(1,2,2,false,2,35);
+    presets["6"] = Params(0,1,0,false,0,35);
+    presets["7"] = Params(4,1,2,false,1,20);
+    presets["8"] = Params(0,3,4,false,2,20);
+}
+
+struct Event {
+    string preset;
+    double duration; // in seconds
+};
+
+Params stored_params;
+std::deque<Event> events;
 
 // global options
 // FIXME: move to a params object so presets can be encapsulated
@@ -154,9 +224,14 @@ std::vector<float> speedFactors = {0.0, 0.03, 0.08, 0.1, 0.5, 2.0, 3.0, 10.0};
 int speedFactorIndex = 4;
 
 bool fogSet = false;
-std::vector<float> fogStarts = {0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0};
+std::vector<float> fogStarts = {0.  ,  0.02,  0.04,  0.06,  0.08,  0.1 ,  0.12,  0.14,  0.16,
+        0.18,  0.2 ,  0.22,  0.24,  0.26,  0.28,  0.3 ,  0.32,  0.34,
+        0.36,  0.38,  0.4 ,  0.42,  0.44,  0.46,  0.48,  0.5 ,  0.52,
+        0.54,  0.56,  0.58,  0.6 ,  0.62,  0.64,  0.66,  0.68,  0.7 ,
+        0.72,  0.74,  0.76,  0.78,  0.8 ,  0.82,  0.84,  0.86,  0.88,
+        0.9 ,  0.92,  0.94,  0.96,  0.98,  1.  };
 float fogDepth = 0.05;
-int fogIndex = 8;
+int fogIndex = 20;
 float fogStart = fogStarts[fogIndex];
 float fogEnd = fogStart + fogDepth;
 
@@ -1039,12 +1114,13 @@ void keyPressed(unsigned char key, int x, int y)
         }
         break;
     case '1':
-        gradient_index = 1;
+        /*gradient_index = 1;
         speedFactorIndex = 3;
         gradient_period_index = 4;
         posterizeSet = true;
         outline_index = 3;
-        currentBuffers = 35;
+        currentBuffers = 35;*/
+        presets["1"].set_global();
         break;
     case '2':
         gradient_index = 2;
@@ -1106,12 +1182,16 @@ void keyPressed(unsigned char key, int x, int y)
         currentBuffers = 20;
         break;
     case '8':
-        gradient_index = 0;
-        speedFactorIndex = 3;
-        gradient_period_index = 4;
-        posterizeSet = false;
-        outline_index = 2;
-        currentBuffers = 20;
+        {
+            Params p = Params();
+            p.gradient_index = 0;
+            p.speedFactorIndex = 3;
+            p.gradient_period_index = 4;
+            p.posterizeSet = false;
+            p.outline_index = 2;
+            p.currentBuffers = 20;
+            p.set_global();
+        }
         break;
     case '-':
     case '_':
@@ -1332,6 +1412,7 @@ void displayKinectData(MyFreenectDevice* device){
 }
 
 void init(){
+    init_presets();
     initGradients();
 }
 
